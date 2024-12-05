@@ -1,0 +1,27 @@
+[project]
+name = "chebai-towns"
+description = "Town embeddings for ChEB-AI"
+version = "0.0.0"
+authors = [
+    { name = "Martin Glauer", email = "martin.glauer@ovgu.de" }
+]
+dependencies = [
+    "chebai",
+    "shapely",
+    "descartes"
+]
+
+[project.optional-dependencies]
+dev = [
+    "tox",
+    "pre-commit",
+    "black"
+]
+
+[build-system]
+build-backend = "flit_core.buildapi"
+requires = ["flit_core >=3.2,<4"]
+
+[project.entry-points.'chebai.plugins']
+models = 'chebai_towns.models'
+loss = 'chebai_towns.loss'
