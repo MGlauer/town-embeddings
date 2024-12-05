@@ -4,23 +4,18 @@ class DistanceLoss(torch.nn.Module):
 
 
     def forward(self, input, target):
-
-        loss = 0
         d = input["output"]
-        for town_distance, belongs, is_contained in zip(d["distances"], target.T, d["containment"]):
-            belongs_loss = []
-            neg_belongs_loss = []
-            for house_distance in town_distance:
-                inner_window_dis = 0
-                closest_outer_window = torch.tensor(1)
-                if house_distance["inner_window_distances"] is not None:
-                    inner_window_dis = torch.sum(house_distance["inner_window_distances"], dim=0)
-                    closest_outer_window = torch.sum(house_distance["outer_window_distances"], dim=0)
-                belongs_loss.append(
-                    belongs * (1 - is_contained) * (house_distance["outer_frame_distance"] + inner_window_dis))
-                neg_belongs_loss.append(
-                    (~belongs) * is_contained * (house_distance["inner_frame_distance"] + closest_outer_window))
-            loss += torch.min(torch.stack(belongs_loss, dim=0), dim=0)[0]
-            loss += torch.max(torch.stack(neg_belongs_loss, dim=0), dim=0)[0]
+        frame_containment = d["frame_containment"]
+        inner_frame_distances = d["inner_frame_distance"]
+        outer_frame_distances = d["outer_frame_distance"]
+        house_containment = d["house_containment"]
+        containment = d["containment"].unsqueeze(-1)
+        inner_window_distances = torch.sum(d["inner_window_distances"] * d["window_containment"],
+                                           dim=-1) * frame_containment
+        outer_window_distances = torch.sum(d["outer_window_distances"] * (1 - d["window_containment"]),
+                                           dim=-1) * frame_containment
+        belongs = target.unsqueeze(-1)
+        fn_loss = torch.min(belongs * (1 - containment) * (outer_frame_distances + inner_window_distances), dim=-1)[0]
+        fp_loss = torch.max((~belongs) * containment * (inner_frame_distances + outer_window_distances), dim=-1)[0]
 
-        return torch.mean(loss)
+        return torch.mean(fp_loss+fn_loss)
