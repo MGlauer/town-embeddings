@@ -1,12 +1,9 @@
 from typing import Dict, Any, Iterable
 
-from chebai.preprocessing.structures import XYData
-from chebai_towns.towns.shape import FrameShape, Box
-from chebai_towns.towns.geometry import House, Town
+from potemkin.towns.shape import FrameShape, Box
+from potemkin.towns.geometry import House, Town
 import torch
-from torch.nn import Module
-from chebai.models import ChebaiBaseNet
-from chebai_towns.towns.shape import Box
+from potemkin.towns.shape import Box
 import shapely
 
 class GeometryNet(torch.nn.Module):
@@ -39,19 +36,17 @@ class GeometryNet(torch.nn.Module):
         house_containment = frame_containment * (1 - torch.max(window_containment, dim=-1)[0])
         containment = torch.max(house_containment, dim=-1)[0]
 
-        new = dict(
+        return dict(
             embeddings=points,
-            frame_containment=frame_containment,
-            window_containment=window_containment,
-            house_containment=house_containment,
-            containment=containment,
+            crisp_frame_containment=frame_containment,
+            crisp_window_containment=window_containment,
+            crisp_house_containment=house_containment,
+            crisp_containment=containment,
             inner_frame_distance=inner_frame_distance,
             outer_frame_distance=outer_frame_distance,
             inner_window_distances=inner_window_distance,
             outer_window_distances=outer_window_distance,
         )
-
-        return new
 
     def _inside(self, l, r, p):
         return torch.prod((l <= p) * (p <= r), dim=-1)
@@ -102,48 +97,14 @@ class GeometryNet(torch.nn.Module):
                 xs, ys = shape.exterior.xy
                 ax.fill(xs, ys, fc=color, ec='k', alpha=0.1)
 
-class TownModel(ChebaiBaseNet):
-    def __init__(self, embedding_model: ChebaiBaseNet, out_dim: int, num_houses_per_class=5, num_windows_per_house=4, *args, **kwargs):
-        super().__init__(*args, **kwargs, exclude_hyperparameter_logging=["embedding_model"])
+class TownModel(torch.nn.Module):
+    def __init__(self, embedding_model, out_dim: int, num_houses_per_class=5, num_windows_per_house=4, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.automatic_optimization = False
         self.embedding_model = embedding_model
         self.box_model = GeometryNet(embedding_dimensions=self.embedding_model.out_dim, num_classes=out_dim, num_houses_per_class=num_houses_per_class, num_windows_per_house=num_windows_per_house)
 
     def forward(self, x, **kwargs):
-        embedding_output = self.embedding_model(x, **kwargs)
-
-        embeddings = embedding_output.pop("logits")
-
-        #for t in self.box_model.towns:
-        #    t.consolidate()
+        embeddings = self.embedding_model(x, **kwargs)
         distances = self.box_model(embeddings)
-
-        return dict(output=distances, embeddings=embeddings, **embedding_output)
-
-    def _process_batch(self, batch: XYData, batch_idx: int) -> Dict[str, Any]:
-        return self.embedding_model._process_batch(batch, batch_idx)
-
-    def training_step(self, batch, batch_idx):
-        for op in self.optimizers():
-            op.zero_grad()
-
-        output = super().training_step(batch, batch_idx)
-
-        output["loss"].backward()
-
-        for op in self.optimizers():
-            op.step()
-
-        return output
-
-    def _get_prediction_and_labels(
-        self, data: Dict[str, Any], labels: torch.Tensor, output: torch.Tensor
-    ) -> (torch.Tensor, torch.Tensor):
-        return output["output"]["containment"], labels
-
-    def configure_optimizers(self):
-        emb_optimizer = torch.optim.Adam(self.embedding_model.parameters(), lr=2e-3)
-        model_optimizer = torch.optim.Adam(self.box_model.parameters(), lr=1e-3)
-        return emb_optimizer, model_optimizer
-
-
+        return distances

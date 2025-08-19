@@ -1,14 +1,16 @@
 [project]
-name = "chebai-towns"
+name = "potemkin"
 description = "Town embeddings for ChEB-AI"
 version = "0.0.0"
 authors = [
     { name = "Martin Glauer", email = "martin.glauer@ovgu.de" }
 ]
 dependencies = [
-    "chebai",
+    "descartes",
+    "pandas",
     "shapely",
-    "descartes"
+    "torch",
+    "tqdm"
 ]
 
 [project.optional-dependencies]
