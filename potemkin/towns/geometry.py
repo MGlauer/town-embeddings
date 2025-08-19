@@ -2,7 +2,7 @@ import torch
 
 from typing import FrozenSet, Generic, Union
 
-from chebai_towns.towns.shape import FrameShape, Point, Box, _All, _Nothing, ALL, NOTHING
+from potemkin.towns.shape import FrameShape, Point, Box, _All, _Nothing, ALL, NOTHING
 from matplotlib import pyplot as plt
 import numpy as np
 import shapely
