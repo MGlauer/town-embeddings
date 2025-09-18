@@ -10,7 +10,9 @@ dependencies = [
     "pandas",
     "shapely",
     "torch",
-    "tqdm"
+    "tqdm",
+    "scipy",
+    "seaborn"
 ]
 
 [project.optional-dependencies]

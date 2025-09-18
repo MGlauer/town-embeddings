@@ -95,6 +95,47 @@ class Box(FrameShape):
         return torch.sum(torch.abs(self.corner1 - self.corner2),dim=0)
 
 
+class Cone(FrameShape):
+    def __init__(self, tensor: torch.Tensor):
+        super().__init__()
+        self.directions = tensor
+
+    def contains_points(self, item: Point):
+        X = torch.linalg.solve(self.directions, item)
+        return torch.all(X >= 0)
+
+    def _side_to_point(self, point: Point, direction, p=2):
+        # line = a + n*t
+        # dist(p, a + n*t) = || (a-p) - dot((a-p), n) * n ||
+        unit_direction = direction / torch.linalg.vector_norm(direction, ord=p)
+        dot_product = torch.sum(-point * unit_direction, dim=-1)
+        return torch.linalg.vector_norm(-point - dot_product.unsqueeze(-1) * unit_direction, ord=p)
+
+    def distance_to_points(self, point: Point, p=2):
+        is_inside = self.contains_points(point)
+
+        min_distance_to_sides = torch.min(self._side_to_point(point, self.direction1, p=p), self._side_to_point(point, self.direction2, p=p))[0]
+        outer_distance = (1-is_inside) * min_distance_to_sides
+        inner_distance = is_inside * min_distance_to_sides
+
+        return dict(outside=outer_distance, inside=inner_distance)
+
+    @classmethod
+    def tensor_shape(cls):
+        return (2,)
+
+    def get_patch(self) -> shapely.Geometry:
+        coords = ((0., 0.), (self.direction1[0].item(), self.direction1[1].item()), (self.direction2[0].item(), self.direction2[1].item()), (0., 0.))
+        return shapely.Polygon(coords)
+
+    def intersection(self, other):
+        if other == NOTHING:
+            return NOTHING
+        if other == ALL:
+            return self
+        pass
+
+
 class _All(FrameShape):
 
     def intersection(self, other):
