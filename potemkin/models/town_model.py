@@ -120,10 +120,8 @@ class ConeGeometryNet(torch.nn.Module):
                  shape_kwargs=None):
         super().__init__()
 
-        self.town_frame_tensor = torch.nn.Parameter(3-6*torch.rand((num_classes, num_houses_per_class, 2, embedding_dimensions)))
-        #self.town_frame_tensor = torch.nn.Parameter(torch.tensor([[[[ 0.4027, -0.4562],[ 0.3190, -1.8115]]]]))
-        self.town_windows_tensor = torch.nn.Parameter(3-6*torch.rand((num_classes, num_houses_per_class, num_windows_per_house, 2, embedding_dimensions)))
-        #self.town_windows_tensor = torch.nn.Parameter(torch.tensor([[[[[-2.7774,  2.7964], [ 1.6096, -2.1528]]]]]))
+        self.town_frame_tensor = torch.nn.Parameter(3-6*torch.rand((num_classes, num_houses_per_class, embedding_dimensions, embedding_dimensions)))
+        self.town_windows_tensor = torch.nn.Parameter(3-6*torch.rand((num_classes, num_houses_per_class, num_windows_per_house, embedding_dimensions, embedding_dimensions)))
         self.p = 2
 
     def forward(self, points):
@@ -136,17 +134,15 @@ class ConeGeometryNet(torch.nn.Module):
         # containment.shape        == (n_points, n_labels)
         containment = torch.max(house_containment, dim=-1)[0]
 
-        frame_distance = self._distance_to_nearest_directions(self.town_frame_tensor, points, p=self.p)
         # inner_frame_distance.shape == (n_points, n_labels, num_houses_per_class)
-        inner_frame_distance = frame_containment * frame_distance
+        inner_frame_distance = frame_containment * self._distance(- self.town_frame_tensor, points, p=self.p)
         # outer_frame_distance.shape == (n_points, n_labels, num_houses_per_class)
-        outer_frame_distance = (1 - frame_containment) * frame_distance
+        outer_frame_distance = (1 - frame_containment) * self._distance(self.town_frame_tensor, points, p=self.p)
 
-        window_distance = self._distance_to_nearest_directions(self.town_windows_tensor, points, p=self.p)
         # inner_window_distance.shape == (n_points, n_labels, num_houses_per_class, num_windows_per_house)
-        inner_window_distance = window_containment * window_distance
+        inner_window_distance = window_containment * self._distance(- self.town_windows_tensor, points, p=self.p)
         # outer_window_distance.shape == (n_points, n_labels, num_houses_per_class, num_windows_per_house)
-        outer_window_distance = (1 - window_containment) * window_distance
+        outer_window_distance = (1 - window_containment) * self._distance(self.town_windows_tensor, points, p=self.p)
 
         return dict(
             embeddings=points,
@@ -161,51 +157,20 @@ class ConeGeometryNet(torch.nn.Module):
         )
 
     def _inside(self, directions, points):
-        # frame_containment:  X.shape == (n_labels, num_houses_per_class, n_dim, n_points)
-        # window_containment: X.shape == (n_labels, num_houses_per_class, num_windows_per_house, n_dim, n_points)
-        X = torch.linalg.solve(directions.transpose(-2, -1), points.T)
-        X = X.movedim(-1, 0)
-        return torch.all(X >= 0, dim=-1).to(torch.int)
+        A = directions.unsqueeze(-3)
+        x = points.unsqueeze(-1).unsqueeze(0).unsqueeze(0)
+        b = A @ x
+        b = b.squeeze(-1)
+        b = b.movedim(-2, 0)
+        return torch.all(b <= 0, dim=-1).to(torch.int)
 
-    def _distance_to_nearest_directions(self, directions, points, p=2):
-        dot_products = (points @ directions.transpose(-2, -1))
-        direction_norms = torch.linalg.vector_norm(directions, ord=p, dim=-1).unsqueeze(-1)
-        point_norms = torch.linalg.vector_norm(points, ord=p, dim=-1)
-        div = (direction_norms * point_norms)
-        result = dot_products / div.movedim(-2, -1)
-        #smallest_angles = torch.min(torch.acos(result), dim=-1)[0]
-        smallest_angles = 1 - torch.max(result, dim=-1)[0]
-        return smallest_angles.movedim(-1, 0)
-
-    # def _distance_to_nearest_directions(self, directions, points, p=2):
-    #     # TODO: margin
-    #     # line = a + n*t
-    #     # dist(p, a + n*t) = || (a-p) - dot((a-p), n) * n ||
-    #     # with a = (0, ..., 0)
-    #     #      dist(p, n*t) = || -p - dot(-p, n) * n ||
-    #     #
-    #     # unit_directions == n
-    #     unit_directions = directions / torch.linalg.vector_norm(directions, ord=p, dim=-1).unsqueeze(-1)
-    #     # dot_products == dot(-p, n)
-    #     dot_products = (-points @ unit_directions.transpose(-2, -1)).unsqueeze(-1)
-    #     dot_products = dot_products.clamp(max=0.0)
-    #     # dot_times_unit == dot(-p, n) * n
-    #     dot_times_unit = dot_products * unit_directions.unsqueeze(-3)       
-    #     almost = -points.unsqueeze(1) - dot_times_unit
-    #     result = torch.linalg.vector_norm(almost, ord=p, dim=-1)
-    #     return torch.min(result, dim=-1)[0].movedim(-1, 0)
-
-    def _is_vector_left_of(self, q, r):
-        assert q.shape == (2,) and r.shape == (2,), "Can only compare 2D vectors"
-        # Calculation based on 2D oriantation test for three points p, q, r:
-        #                               | 1 p_x p_y |
-        #    orientation(p, q, r) = det | 1 q_x q_y |
-        #                               | 1 r_x r_y |
-        #    orientation > 0: r is left of line pq
-        #    orientation < 0: r is right of line pq
-        #    orientation = 0: p, q, r are collinear
-        # With p = (0, 0), this simplfies to:
-        return q[0] * r[1] - q[1] * r[0] < 0
+    def _distance(self, directions, points, p=2):
+        A = directions.unsqueeze(-3)
+        x = points.unsqueeze(-1).unsqueeze(0).unsqueeze(0)
+        b = A @ x
+        b = b.squeeze(-1)
+        b = b.movedim(-2, 0)
+        return torch.linalg.vector_norm(torch.relu(b), ord=p, dim=-1)
 
     def _find_direction_bound(self, direction, xlim, ylim):
         assert direction.shape == (2,), "Can only create patches from single 2D direction vectors"
@@ -227,16 +192,11 @@ class ConeGeometryNet(torch.nn.Module):
             return x0, y0, d0
         else:
             return x1, y1, d1
-
-    def _tensor_to_patch(self, tensor, xlim, ylim):
-        assert tensor.shape == (2, 2), "Can only create patches from two 2D direction vectors"
-        assert xlim is not None and ylim is not None, "Need xlim and ylim to create patches"
-        direction1 = tensor[0].detach().numpy()
-        direction2 = tensor[1].detach().numpy()
-        # direction1 should be right of direction2
-        if self._is_vector_left_of(direction1, direction2):
-            direction1, direction2 = direction2, direction1
-            
+        
+    def _get_half_plane_polygon(self, direction1: torch.Tensor, direction2: torch.Tensor, xlim, ylim) -> shapely.Polygon:
+        """
+        The half-plane bordered by direction1 and direction2 should be left of direction1 and right of direction2.
+        """
         patch_corners = [(0., 0.)]
         x0, y0, d0 = self._find_direction_bound(direction1, xlim, ylim)
         patch_corners.append((x0, y0))
@@ -253,6 +213,27 @@ class ConeGeometryNet(torch.nn.Module):
         patch_corners.append((x1, y1))
         patch_corners.append((0., 0.))
         return shapely.Polygon(patch_corners)
+
+    def _tensor_to_patch(self, tensor: torch.Tensor, xlim, ylim) -> shapely.Geometry:
+        assert tensor.shape == (2, 2), "Can only create patches from 2d cone with 2 constraints"
+        assert xlim is not None and ylim is not None, "Need xlim and ylim to create patches"
+        # The cone is defined through:
+        #     ┏           ┓     ┏   ┓      ┏   ┓
+        #     ┃ c1_1 c1_2 ┃  *  ┃ x ┃  <=  ┃ 0 ┃
+        #     ┃ c2_1 c2_2 ┃     ┃ y ┃      ┃ 0 ┃
+        #     ┗           ┛     ┗   ┛      ┗   ┛
+        # 
+        # <=> c1_1 * x + c1_2 * y <= 0
+        #     c2_1 * x + c2_2 * y <= 0
+        constraint1 = tensor[0].detach()
+        constraint2 = tensor[1].detach()
+        # Vector (c_1, c_2) is orthogonal to line c_1 * x + c_2 * y = 0 and points towards the side where c_1 * x + c_2 * y > 0
+        # Define direction vectors so that contraint vector is to its right side, since _get_half_plane_polygon() expects half-plane (<= 0) to be left of the direction vector
+        direction1 = torch.tensor([- constraint1[1], constraint1[0]])
+        direction2 = torch.tensor([- constraint2[1], constraint2[0]])
+        polygon1 = self._get_half_plane_polygon(direction1, - direction1, xlim, ylim)
+        polygon2 = self._get_half_plane_polygon(direction2, - direction2, xlim, ylim)
+        return shapely.intersection(polygon1, polygon2)
 
     def get_patches(self, xlim, ylim) -> Iterable[shapely.Geometry]:
         towns = self.town_windows_tensor.shape[0]
@@ -274,9 +255,10 @@ class ConeGeometryNet(torch.nn.Module):
 
     def render(self, ax, colors):
         polygons = []
+        shape: shapely.Geometry
         for shape, color in zip(self.get_patches(ax.get_xlim(), ax.get_ylim()), colors):
-            if shape.is_empty:
-                continue
+            # if shape.is_empty:
+            #     continue
             if isinstance(shape, shapely.GeometryCollection):
                 for geom in shape.geoms:
                     if isinstance(geom, shapely.Polygon):
@@ -286,9 +268,12 @@ class ConeGeometryNet(torch.nn.Module):
                 for geom in shape.geoms:
                     xs, ys = geom.exterior.xy
                     polygons += ax.fill(xs, ys, fc=color, ec='k', alpha=0.1)
-            else:
-                xs, ys = shape.exterior.xy
-                polygons += ax.fill(xs, ys, fc=color, ec='k', alpha=0.1)
+            elif isinstance(shape, shapely.Polygon):
+                 xs, ys = shape.exterior.xy
+                 polygons += ax.fill(xs, ys, fc=color, ec='k', alpha=0.1)
+            # else:
+            #     xs, ys = shape.exterior.xy
+            #     polygons += ax.fill(xs, ys, fc=color, ec='k', alpha=0.1)
         return polygons
 
 class ConeTownModel(torch.nn.Module):
