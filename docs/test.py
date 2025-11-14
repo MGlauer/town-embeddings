@@ -1,6 +1,15 @@
+from typing import Any
+from unicodedata import name
 import torch
 from ultralytics import YOLO
+from ultralytics.models.yolo.detect import DetectionTrainer
+from ultralytics.nn.tasks import DetectionModel
 from ultralytics.engine.results import Results
+from ultralytics.utils import RANK
+from ultralytics.utils.loss import (
+    E2EDetectLoss,
+    v8DetectionLoss,
+)
 from matplotlib import pyplot as plt
 import matplotlib.animation as animation
 from potemkin.io.render import draw_2d_on_axes
@@ -8,8 +17,67 @@ from potemkin.loss.town_loss import DistanceLoss
 from potemkin.models.town_model import ConeTownModel
 from matplotlib import colormaps
 
+
+class ConeLoss:
+    """Criterion class for computing training losses for end-to-end detection."""
+
+    def __init__(self, model):
+        """Initialize E2EDetectLoss with one-to-many and one-to-one detection losses using the provided model."""
+        self.model = model
+        self.features = None
+        # The layer from which to extract the features / embeddings from
+        #feature_layer: tuple[str, torch.nn.Module] = list(self.model.model.named_modules())[-3]
+        feature_layer: torch.nn.Module = dict(self.model.model.named_modules())["23.cv2.2"]
+        #for name, m in model.model.named_modules():
+        #    print(name)
+        feature_layer.register_forward_hook(self.feature_layer_hook)
+        self.loss = E2EDetectLoss(model) if getattr(model, "end2end", False) else v8DetectionLoss(model)
+
+    def feature_layer_hook(self, module, input, output):
+        self.features = output
+
+    def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+        print("----------------------------------\n")
+        print("Features shape:", self.features.shape if self.features is not None else "None")
+        print("Preds keys:", )
+        print("----------------------------------\n")
+        return self.loss(preds, batch)
+
+
+class ConeModel(DetectionModel):
+
+    def init_criterion(self):
+        """Initialize the loss criterion for the DetectionModel."""
+        return ConeLoss(self)
+
+
+class ConeTrainer(DetectionTrainer):
+
+    def get_model(self, cfg: str | None = None, weights: str | None = None, verbose: bool = True):
+        """
+        Return a YOLO detection model.
+
+        Args:
+            cfg (str, optional): Path to model configuration file.
+            weights (str, optional): Path to model weights.
+            verbose (bool): Whether to display model information.
+
+        Returns:
+            (DetectionModel): YOLO detection model.
+        """
+        model = ConeModel(cfg, nc=self.data["nc"], ch=self.data["channels"], verbose=verbose and RANK == -1)
+        if weights:
+            model.load(weights)
+        return model
+
+
 model = YOLO("yolo11s.pt")
-model.train(data="pizzaiolo/DEMO_SAMPLE_pizzaiolo_dataset_YOLO/data.yaml", epochs=10)
+model.train(
+    trainer=ConeTrainer,
+    data="pizzaiolo/DEMO_SAMPLE_pizzaiolo_dataset_YOLO/data.yaml", 
+    epochs=10
+)
 results: list[Results] = model("pizzaiolo/DEMO_SAMPLE_pizzaiolo_dataset_YOLO/test/images")
 
 n_dim = 2
