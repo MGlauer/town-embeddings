@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from ultralytics import YOLO
+from ultralytics.utils.loss import v8DetectionLoss
 from torch.utils.data import Dataset, DataLoader
 import cv2
 import numpy as np
@@ -8,45 +9,39 @@ from pathlib import Path
 import sys
 import os
 
-class ClassificationHeadDummy(nn.Module):
-    """This is an example classification head. Don't use in production!"""
-
-    def __init__(self, embedding_dim=512, num_classes=10, dropout=0.3):
-        super().__init__()
-        self.classifier = nn.Sequential(
-            nn.Linear(embedding_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(128, num_classes)
-        )
-
-    def forward(self, boxes):
-        return self.classifier(boxes)
+from potemkin.loss.town_loss import DistanceLoss
+from potemkin.models.town_model import ConeGeometryNet
 
 
 class YOLOWithClassifier(nn.Module):
     """Combined YOLO11 detection + classification model"""
 
     def __init__(self, yolo_model_path='yolo11s.pt', num_classes=10,
-                 embedding_dim=512, freeze_yolo=False):
+                 embedding_dim=3, freeze_yolo=False, num_houses_per_class=5, num_windows_per_house=4,):
         super().__init__()
         # Load YOLO11 model
         self.yolo = YOLO(yolo_model_path, task="detect")
         self.yolo_model = self.yolo.model
+        self.box_model = ConeGeometryNet(embedding_dimensions=embedding_dim, num_classes=num_classes,
+                                         num_houses_per_class=num_houses_per_class,
+                                         num_windows_per_house=num_windows_per_house)
 
         # Optionally freeze YOLO weights, if we do not want to co-train cones and YOLO
         if freeze_yolo:
             for param in self.yolo_model.parameters():
                 param.requires_grad = False
 
-        # Classification head
-        self.classifier = ClassificationHeadDummy(embedding_dim, num_classes)
+        # Classification head#
+        self.embedding_dim = embedding_dim
 
     def extract_embeddings(self, features, detections):
+
+        # Here we become a bit crafty. We will, pretend that the things that are in a batch actually occurred in the same picture.
+        # This will ease the computational load and save us some headache on the implementation side. (fingers crossed)
         boxes = []
+        embeddings = []
+        assignments = []
+
 
         for i, det in enumerate(detections):
             batch_boxes = []
@@ -56,32 +51,34 @@ class YOLOWithClassifier(nn.Module):
                     x1, y1, x2, y2 = box.int()
                     # Extract region
                     region = features[i, :, y1:y2, x1:x2]
-                    batch_boxes.append((box,region))
-            boxes.append(batch_boxes)
+                    # Todo: Here we need a more sophisticated, **trainable** aggregation technique.
+                    embedding = nn.functional.adaptive_avg_pool2d(region, (self.embedding_dim, 1)).squeeze(-1)
+                    embedding = embedding.mean(dim=0)
+                    embeddings.append(embedding)
+                    boxes.append(box)
+                    assignments.append(i)
 
-        return boxes
+        return torch.stack(boxes), torch.stack(embeddings), torch.tensor(assignments)
 
     def forward(self, x):
         """
-        Forward pass through YOLO and classifier
-        Returns: detections, classifications (if extract_features=True)
+        Forward pass through YOLO and cone model
+        Returns: dict
         """
 
         with torch.set_grad_enabled(not self.training):
             # Detect boxes
-            # Settign IOU here is important, because we have overlapping boxes!
+            # Settign IOU and confidence here is important, because we have overlapping boxes!
             # See: https://www.ultralytics.com/glossary/intersection-over-union-iou
             detections = self.yolo(x, conf=0, iou=0.95)
 
         # Extract embeddings for detected objects
-        boxes = self.extract_embeddings(x, detections)
+        boxes, embeddings, assignments = self.extract_embeddings(x, detections)
 
-        if boxes is not None:
-            # Classify detected objects
-            classifications = self.classifier(boxes)
-            return detections, classifications, boxes
+        # Classify detected objects
+        distances = self.box_model(embeddings)
 
-        return detections, None, None
+        return {"embeddings": embeddings, "distances": distances, "boxes": detections}
 
 
 class YOLOClassificationDataset(Dataset):
@@ -123,7 +120,7 @@ def collate_fn(batch):
 
 
 def train_epoch(model, dataloader, optimizer, detection_criterion,
-                classification_criterion, device):
+                distance_loss, device):
 
     total_loss = 0
 
@@ -134,19 +131,14 @@ def train_epoch(model, dataloader, optimizer, detection_criterion,
         optimizer.zero_grad()
 
         # Forward pass
-        detections, classifications, boxes = model(images)
+        results = model(images)
 
         # Compute detection loss (YOLO's built-in loss)
-        det_loss = detection_criterion(detections, targets)
+        det_loss = detection_criterion(results["boxes"], targets)
 
-        # Compute classification loss if we have detections
-        cls_loss = 0
-        if classifications is not None and len(classifications) > 0:
-            # Assuming targets contains class labels
-            # You'll need to match detections to ground truth
-            cls_targets = targets[:, 0].long()  # Extract class labels
-            if len(cls_targets) == len(classifications):
-                cls_loss = classification_criterion(classifications, cls_targets)
+        # Todo: Here we will need something more sophisticated. As far as I can see,
+        cls_targets = targets[:, 0].long()  # Extract class labels
+        cls_loss = distance_loss(results["distances"], cls_targets)
 
         # Combined loss
         loss = det_loss + cls_loss
@@ -171,7 +163,7 @@ def main(data_path):
     model = YOLOWithClassifier(
         yolo_model_path='yolo11s.pt',
         num_classes=num_classification_classes,
-        embedding_dim=512,
+        embedding_dim=3,
         freeze_yolo=False  # Set to True to only train classifier
     ).to(device)
 
@@ -184,18 +176,18 @@ def main(data_path):
                               shuffle=True, num_workers=4, collate_fn=collate_fn)
 
 
-    detection_criterion = nn.MSELoss()  # TODO: Figure out how to integrate YOLO-loss
-    classification_criterion = nn.BCEWithLogitsLoss()
+    detection_criterion = v8DetectionLoss(model.yolo_model)  # TODO: Figure out how to integrate YOLO-loss
+    distance_loss = DistanceLoss()
 
     optimizer = torch.optim.Adam([
         {'params': model.yolo_model.parameters(), 'lr': learning_rate},
-        {'params': model.classifier.parameters(), 'lr': learning_rate}
+        {'params': model.box_model.parameters(), 'lr': learning_rate}
     ])
 
     # Training loop
     for epoch in range(epochs):
         loss = train_epoch(model, train_loader, optimizer,
-                           detection_criterion, classification_criterion,
+                           detection_criterion, distance_loss,
                            device)
         print(f'Epoch {epoch + 1}/{epochs}, Loss: {loss:.4f}')
 
