@@ -4,3 +4,4 @@ docs/*.gif
 runs/*
 job.err
 job.out
+*.pt
