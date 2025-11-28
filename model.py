@@ -133,7 +133,7 @@ class YOLOWithClassifier(nn.Module):
             #This is a filter that decides whether a box should (not) be dropped.
             boxes_xyxy, embeddings, fltr = self.extract_boxes_and_embeddings(raw_preds.permute(0,2,1), feats, x.shape[2:])
 
-        batch_indices = torch.arange(num_batches).unsqueeze(1).repeat(1,embeddings.shape[1])
+        batch_indices = torch.arange(num_batches, device=embeddings.device).unsqueeze(1).repeat(1,embeddings.shape[1])
         stacked_embeddings = torch.cat([x[f] for x,f in zip(embeddings, fltr)], dim=0)
         stack_batches = torch.cat([x[f] for x, f in zip(batch_indices, fltr)], dim=0)
 
@@ -160,7 +160,7 @@ class BBoxLoss(torch.nn.Module):
 
         ious = box_iou(pred_boxes, target_boxes)
         best_value, best_idx = torch.max(ious, dim=1)
-        boxes_with_no_match = [best_value==0]
+        boxes_with_no_match = (best_value==0)
         # For boxes that do not overlap with any box, we assign a random "best-fitting" box.
         # Todo: Maybe we could choose the closest box here instead.
         best_idx[boxes_with_no_match] = torch.randint_like(best_idx, target_boxes.shape[0])[boxes_with_no_match]
@@ -233,8 +233,8 @@ def train_epoch(model, dataloader, optimizer, detection_criterion,
 
 
             # Compute detection loss (YOLO's built-in loss)
-            target_boxes = targets["boxes"][batch_part]
-            target_label = targets["labels"][batch_part]
+            target_boxes = targets["boxes"][batch_part].to(device)
+            target_label = targets["labels"][batch_part].to(device)
             det_loss, box_assignment = detection_criterion(result["boxes"], target_boxes)
 
 
